@@ -11,7 +11,7 @@ export const authController = {
   // Register
   register: async (req, res) => {
     try {
-      const { firstName, lastName, email, phone, password, role } = req.body;
+      const { firstName, lastName, email, phone, password } = req.body;
 
       if (!firstName || !lastName || !email || !phone || !password) {
         return res.status(400).json({ message: 'All fields are required' });
@@ -28,7 +28,8 @@ export const authController = {
         email,
         phone,
         password,
-        role: role || 'user',
+        // Public registration must never grant an administrative role.
+        role: 'user',
       });
 
       await user.save();

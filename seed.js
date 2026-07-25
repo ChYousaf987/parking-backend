@@ -8,9 +8,8 @@ dotenv.config();
 const seedDatabase = async () => {
   try {
     // Connect to MongoDB
-    const mongoUrl =
-      process.env.MONGODB_URL ||
-      'mongodb+srv://yousafawais987_db_user:parkingpass@cluster0.wpxzmuc.mongodb.net/parking?appName=Cluster0';
+    const mongoUrl = process.env.MONGODB_URL;
+    if (!mongoUrl) throw new Error('MONGODB_URL is required');
     await mongoose.connect(mongoUrl);
     console.log('Connected to MongoDB');
 

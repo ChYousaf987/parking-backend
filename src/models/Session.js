@@ -50,7 +50,11 @@ const sessionSchema = new mongoose.Schema(
     },
     paymentMethod: {
       type: String,
-      enum: ['credit_card', 'debit_card', 'digital_wallet', 'cash'],
+      enum: ['credit_card', 'debit_card', 'digital_wallet', 'cash', 'card'],
+      default: null,
+    },
+    paymentIntentId: {
+      type: String,
       default: null,
     },
     notes: {

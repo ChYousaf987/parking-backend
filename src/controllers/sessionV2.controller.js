@@ -7,7 +7,9 @@ import {
   generateExitQRCode,
   generateGateQRCode,
   parseQRCode,
+  parseAndVerifyGateQRCode,
 } from '../services/qrcode.service.js';
+import { Vehicle } from '../models/Vehicle.js';
 import { stripeService } from '../services/stripe.service.js';
 
 export const sessionControllerV2 = {
@@ -47,17 +49,21 @@ export const sessionControllerV2 = {
   // Generate static Gate QR for entrance
   generateGateQR: async (req, res) => {
     try {
-      const { locationId } = req.body;
+      const { locationId, gateType = 'entry' } = req.body;
 
       const location = await ParkingLocation.findById(locationId);
       if (!location) {
         return res.status(404).json({ message: 'Location not found' });
       }
 
-      const gateQR = await generateGateQRCode(locationId, location.name);
+      const gateQR = await generateGateQRCode(
+        locationId,
+        location.name,
+        gateType
+      );
 
       res.status(200).json({
-        message: 'Gate QR code generated',
+        message: `${gateType} gate QR code generated`,
         qr: gateQR,
       });
     } catch (error) {
@@ -68,17 +74,33 @@ export const sessionControllerV2 = {
   // Start parking session by scanning gate QR
   startSessionFromGateQR: async (req, res) => {
     try {
-      const { userId, vehicleId, qrData } = req.body;
+      const { vehicleId, qrData } = req.body;
+      const userId = req.user._id;
 
-      if (!userId || !vehicleId || !qrData) {
+      if (!vehicleId || !qrData) {
         return res
           .status(400)
-          .json({ message: 'userId, vehicleId and qrData are required' });
+          .json({ message: 'vehicleId and qrData are required' });
       }
 
-      const parsed = parseQRCode(qrData);
-      if (!parsed || parsed.type !== 'gate' || !parsed.locationId) {
+      let parsed;
+      try {
+        parsed = parseAndVerifyGateQRCode(qrData);
+      } catch (error) {
+        return res.status(400).json({ message: error.message });
+      }
+      if (parsed.gateType !== 'entry') {
         return res.status(400).json({ message: 'Invalid gate QR code' });
+      }
+
+      const vehicle = await Vehicle.findOne({ _id: vehicleId, userId });
+      if (!vehicle) {
+        return res.status(403).json({ message: 'This vehicle does not belong to you' });
+      }
+
+      const existingSession = await Session.findOne({ userId, status: 'active' });
+      if (existingSession) {
+        return res.status(409).json({ message: 'You already have an active parking session' });
       }
 
       const locationId = parsed.locationId;
@@ -87,21 +109,18 @@ export const sessionControllerV2 = {
         return res.status(404).json({ message: 'Location not found' });
       }
 
-      const spot = await ParkingSpot.findOne({
-        locationId,
-        status: 'available',
-      });
+      // Atomic allocation prevents two scans from receiving the same slot.
+      const spot = await ParkingSpot.findOneAndUpdate(
+        { locationId, status: 'available' },
+        { status: 'occupied', lastUpdated: new Date() },
+        { new: true, sort: { floor: 1, section: 1, spotNumber: 1 } }
+      );
 
       if (!spot) {
         return res
           .status(400)
           .json({ message: 'No free parking spots available' });
       }
-
-      spot.status = 'occupied';
-      spot.lastUpdated = new Date();
-      spot.occupiedBy = null;
-      await spot.save();
 
       const session = new Session({
         userId,
@@ -114,6 +133,7 @@ export const sessionControllerV2 = {
       });
 
       await session.save();
+      await ParkingSpot.findByIdAndUpdate(spot._id, { occupiedBy: session._id });
 
       const exitQR = await generateExitQRCode(
         session._id,
@@ -134,8 +154,70 @@ export const sessionControllerV2 = {
       res.status(201).json({
         message: 'Parking session started via gate scan',
         session,
-        allocatedSpot: spot,
+        allocatedSpot: {
+          id: spot._id,
+          number: spot.spotNumber,
+          floor: spot.floor,
+          section: spot.section,
+        },
         exitQR,
+      });
+    } catch (error) {
+      res.status(500).json({ message: error.message });
+    }
+  },
+
+  // The exit gate QR only identifies the gate. The logged-in user's active
+  // session supplies the vehicle, entry time and assigned parking slot.
+  scanExitGateQR: async (req, res) => {
+    try {
+      const { qrData } = req.body;
+      if (!qrData) return res.status(400).json({ message: 'qrData is required' });
+
+      let parsed;
+      try {
+        parsed = parseAndVerifyGateQRCode(qrData);
+      } catch (error) {
+        return res.status(400).json({ message: error.message });
+      }
+      if (parsed.gateType !== 'exit') {
+        return res.status(400).json({ message: 'Please scan the exit gate QR code' });
+      }
+
+      const session = await Session.findOne({ userId: req.user._id, status: 'active' })
+        .populate('parkingSpotId', 'spotNumber floor section')
+        .populate('locationId', 'name hourlyRate');
+      if (!session) {
+        return res.status(404).json({ message: 'No active parking session found' });
+      }
+      if (session.locationId._id.toString() !== parsed.locationId) {
+        return res.status(400).json({ message: 'This exit gate is for another parking location' });
+      }
+
+      const exitTime = new Date();
+      const durationMinutes = Math.max(1, Math.ceil((exitTime - session.entryTime) / 60000));
+      const hourlyRate = session.locationId.hourlyRate;
+      const cost = Math.ceil((durationMinutes / 60) * hourlyRate);
+
+      session.exitTime = exitTime;
+      session.duration = durationMinutes;
+      session.cost = cost;
+      await session.save();
+
+      return res.status(200).json({
+        message: 'Parking bill calculated',
+        sessionId: session._id,
+        parkingSpot: session.parkingSpotId,
+        invoice: {
+          location: session.locationId.name,
+          entryTime: session.entryTime,
+          exitTime,
+          durationMinutes,
+          hourlyRate,
+          amount: cost,
+          currency: 'PKR',
+          paymentStatus: 'pending',
+        },
       });
     } catch (error) {
       res.status(500).json({ message: error.message });
@@ -210,6 +292,12 @@ export const sessionControllerV2 = {
       if (!session) {
         return res.status(404).json({ message: 'Session not found' });
       }
+      if (session.userId._id.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ message: 'This parking session does not belong to you' });
+      }
+      if (session.status !== 'active') {
+        return res.status(400).json({ message: 'This parking session is already closed' });
+      }
 
       const exitTime = new Date();
       const durationMinutes = Math.ceil(
@@ -242,27 +330,13 @@ export const sessionControllerV2 = {
       session.exitTime = exitTime;
       session.duration = durationMinutes;
       session.cost = totalCost;
-      session.status = 'completed';
+      // Keep the slot occupied until payment succeeds. It is released by
+      // confirmPayment after Stripe confirms the charge.
+      session.status = 'active';
       session.paymentStatus = paymentIntentId ? 'pending' : 'failed';
+      session.paymentIntentId = paymentIntentId;
 
       await session.save();
-
-      // Update spot to available
-      await ParkingSpot.findByIdAndUpdate(session.parkingSpotId, {
-        status: 'available',
-        lastUpdated: new Date(),
-        occupiedBy: null,
-      });
-
-      // Update location occupancy
-      const occupiedCount = await ParkingSpot.countDocuments({
-        locationId: session.locationId,
-        status: 'occupied',
-      });
-
-      await ParkingLocation.findByIdAndUpdate(session.locationId, {
-        currentOccupancy: occupiedCount,
-      });
 
       res.status(200).json({
         message: 'Parking session ended',
@@ -286,6 +360,12 @@ export const sessionControllerV2 = {
       if (!session) {
         return res.status(404).json({ message: 'Session not found' });
       }
+      if (session.userId.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ message: 'This parking session does not belong to you' });
+      }
+      if (!session.paymentIntentId || session.paymentIntentId !== paymentIntentId) {
+        return res.status(400).json({ message: 'Payment intent does not match this session' });
+      }
 
       // Confirm with Stripe
       try {
@@ -297,7 +377,21 @@ export const sessionControllerV2 = {
         if (paymentIntent.status === 'succeeded') {
           session.paymentStatus = 'completed';
           session.paymentMethod = 'card';
+          session.status = 'completed';
           await session.save();
+
+          await ParkingSpot.findByIdAndUpdate(session.parkingSpotId, {
+            status: 'available',
+            occupiedBy: null,
+            lastUpdated: new Date(),
+          });
+          const occupiedCount = await ParkingSpot.countDocuments({
+            locationId: session.locationId,
+            status: 'occupied',
+          });
+          await ParkingLocation.findByIdAndUpdate(session.locationId, {
+            currentOccupancy: occupiedCount,
+          });
 
           res.status(200).json({
             message: 'Payment successful',
