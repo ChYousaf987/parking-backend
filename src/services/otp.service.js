@@ -1,11 +1,15 @@
 import nodemailer from 'nodemailer';
 
+// Support both the current MAIL_* names and the older EMAIL_* names.
+const mailUser = process.env.MAIL_USER || process.env.EMAIL_USER;
+const mailPassword = process.env.MAIL_PASS || process.env.EMAIL_PASS;
+
 // Configure nodemailer
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
-    user: process.env.EMAIL_USER || 'your-email@gmail.com',
-    pass: process.env.EMAIL_PASS || 'your-app-password',
+    user: mailUser,
+    pass: mailPassword,
   },
 });
 
@@ -18,7 +22,7 @@ export const generateOTP = () => {
 export const sendOTPEmail = async (email, otp, name) => {
   try {
     const mailOptions = {
-      from: process.env.EMAIL_USER,
+      from: mailUser,
       to: email,
       subject: 'Your Parking Registration OTP',
       html: `

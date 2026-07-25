@@ -5,8 +5,8 @@ export const vehicleController = {
   addVehicle: async (req, res) => {
     try {
       const {
-        userId,
         licensePlate,
+        registrationNumber,
         vehicleType,
         brand,
         model,
@@ -17,8 +17,33 @@ export const vehicleController = {
         isDefault,
       } = req.body;
 
+      // The existing API documentation uses `registrationNumber`; accept it as
+      // an alias for the database field, `licensePlate`.
+      const plate = (licensePlate || registrationNumber)?.trim();
+      const requiredFields = {
+        licensePlate: plate,
+        vehicleType,
+        brand,
+        model,
+        color,
+        year,
+        registrationExpiry,
+      };
+      const missingFields = Object.entries(requiredFields)
+        .filter(([, value]) => value === undefined || value === null || value === '')
+        .map(([field]) => field);
+
+      if (missingFields.length > 0) {
+        return res.status(400).json({
+          message: `Missing required fields: ${missingFields.join(', ')}`,
+        });
+      }
+
       // Check if license plate already exists
-      const existingVehicle = await Vehicle.findOne({ licensePlate });
+      const normalizedPlate = plate.toUpperCase();
+      const existingVehicle = await Vehicle.findOne({
+        licensePlate: normalizedPlate,
+      });
       if (existingVehicle) {
         return res
           .status(400)
@@ -26,8 +51,8 @@ export const vehicleController = {
       }
 
       const vehicle = new Vehicle({
-        userId,
-        licensePlate: licensePlate.toUpperCase(),
+        userId: req.user._id,
+        licensePlate: normalizedPlate,
         vehicleType,
         brand,
         model,

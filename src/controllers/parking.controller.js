@@ -57,7 +57,8 @@ export const parkingController = {
         location,
       });
     } catch (error) {
-      res.status(500).json({ message: error.message });
+      const status = error.name === 'ValidationError' ? 400 : 500;
+      res.status(status).json({ message: error.message });
     }
   },
 
