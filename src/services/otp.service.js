@@ -22,9 +22,9 @@ export const generateOTP = () => {
 export const sendOTPEmail = async (email, otp, name) => {
   try {
     const mailOptions = {
-      from: mailUser,
+      from: `"Soptsco Parking" <${mailUser}>`,
       to: email,
-      subject: 'Your Parking Registration OTP',
+      subject: 'Your Soptsco Parking Verification Code',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; text-align: center; color: white; border-radius: 10px 10px 0 0;">
