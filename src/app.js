@@ -78,8 +78,8 @@ app.use(cookieParser());
 app.use('/api/auth', authRoutes);
 app.use('/api/auth/v2', authV2Routes);
 app.use('/api/parking', parkingRoutes);
-app.use('/api/sessions', sessionRoutes);
 app.use('/api/sessions/v2', sessionsV2Routes);
+app.use('/api/sessions', sessionRoutes);
 app.use('/api/vehicles', vehicleRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 
