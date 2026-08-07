@@ -95,12 +95,19 @@ export const sessionControllerV2 = {
 
       const vehicle = await Vehicle.findOne({ _id: vehicleId, userId });
       if (!vehicle) {
-        return res.status(403).json({ message: 'This vehicle does not belong to you' });
+        return res
+          .status(403)
+          .json({ message: 'This vehicle does not belong to you' });
       }
 
-      const existingSession = await Session.findOne({ userId, status: 'active' });
+      const existingSession = await Session.findOne({
+        userId,
+        status: 'active',
+      });
       if (existingSession) {
-        return res.status(409).json({ message: 'You already have an active parking session' });
+        return res
+          .status(409)
+          .json({ message: 'You already have an active parking session' });
       }
 
       const locationId = parsed.locationId;
@@ -133,7 +140,9 @@ export const sessionControllerV2 = {
       });
 
       await session.save();
-      await ParkingSpot.findByIdAndUpdate(spot._id, { occupiedBy: session._id });
+      await ParkingSpot.findByIdAndUpdate(spot._id, {
+        occupiedBy: session._id,
+      });
 
       const exitQR = await generateExitQRCode(
         session._id,
@@ -172,7 +181,8 @@ export const sessionControllerV2 = {
   scanExitGateQR: async (req, res) => {
     try {
       const { qrData } = req.body;
-      if (!qrData) return res.status(400).json({ message: 'qrData is required' });
+      if (!qrData)
+        return res.status(400).json({ message: 'qrData is required' });
 
       let parsed;
       try {
@@ -181,21 +191,33 @@ export const sessionControllerV2 = {
         return res.status(400).json({ message: error.message });
       }
       if (parsed.gateType !== 'exit') {
-        return res.status(400).json({ message: 'Please scan the exit gate QR code' });
+        return res
+          .status(400)
+          .json({ message: 'Please scan the exit gate QR code' });
       }
 
-      const session = await Session.findOne({ userId: req.user._id, status: 'active' })
+      const session = await Session.findOne({
+        userId: req.user._id,
+        status: 'active',
+      })
         .populate('parkingSpotId', 'spotNumber floor section')
         .populate('locationId', 'name hourlyRate');
       if (!session) {
-        return res.status(404).json({ message: 'No active parking session found' });
+        return res
+          .status(404)
+          .json({ message: 'No active parking session found' });
       }
       if (session.locationId._id.toString() !== parsed.locationId) {
-        return res.status(400).json({ message: 'This exit gate is for another parking location' });
+        return res
+          .status(400)
+          .json({ message: 'This exit gate is for another parking location' });
       }
 
       const exitTime = new Date();
-      const durationMinutes = Math.max(1, Math.ceil((exitTime - session.entryTime) / 60000));
+      const durationMinutes = Math.max(
+        1,
+        Math.ceil((exitTime - session.entryTime) / 60000)
+      );
       const hourlyRate = session.locationId.hourlyRate;
       const cost = Math.ceil((durationMinutes / 60) * hourlyRate);
 
@@ -293,10 +315,14 @@ export const sessionControllerV2 = {
         return res.status(404).json({ message: 'Session not found' });
       }
       if (session.userId._id.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ message: 'This parking session does not belong to you' });
+        return res
+          .status(403)
+          .json({ message: 'This parking session does not belong to you' });
       }
       if (session.status !== 'active') {
-        return res.status(400).json({ message: 'This parking session is already closed' });
+        return res
+          .status(400)
+          .json({ message: 'This parking session is already closed' });
       }
 
       const exitTime = new Date();
@@ -311,19 +337,41 @@ export const sessionControllerV2 = {
 
       // Create Stripe payment intent
       let paymentIntentId = null;
+      let paymentIntentError = null;
       try {
-        const user = await User.findById(session.userId);
-        if (user?.stripeCustomerId) {
-          const paymentIntent = await stripeService.createPaymentIntent(
-            user.stripeCustomerId,
-            totalCost,
-            session._id.toString(),
-            `Parking Session - Slot ${session.parkingSpotId}`
-          );
-          paymentIntentId = paymentIntent.id;
+        const userId = session.userId?._id || session.userId;
+        const user = await User.findById(userId);
+        if (user) {
+          if (!user.stripeCustomerId) {
+            try {
+              const stripeCustomer = await stripeService.createCustomer(
+                user.email,
+                `${user.firstName} ${user.lastName}`,
+                user.phone
+              );
+              user.stripeCustomerId = stripeCustomer.id;
+              await user.save();
+            } catch (stripeCustomerError) {
+              console.error(
+                'Stripe customer creation failed:',
+                stripeCustomerError
+              );
+            }
+          }
+
+          if (user.stripeCustomerId) {
+            const paymentIntent = await stripeService.createPaymentIntent(
+              user.stripeCustomerId,
+              totalCost,
+              session._id.toString(),
+              `Parking Session - Slot ${session.parkingSpotId}`
+            );
+            paymentIntentId = paymentIntent.id;
+          }
         }
       } catch (paymentError) {
         console.error('Payment intent creation failed:', paymentError);
+        paymentIntentError = paymentError.message;
       }
 
       // Update session
@@ -332,9 +380,20 @@ export const sessionControllerV2 = {
       session.cost = totalCost;
       // Keep the slot occupied until payment succeeds. It is released by
       // confirmPayment after Stripe confirms the charge.
-      session.status = 'active';
+      session.status = paymentIntentId ? 'active' : 'active';
       session.paymentStatus = paymentIntentId ? 'pending' : 'failed';
       session.paymentIntentId = paymentIntentId;
+
+      await session.save();
+
+      res.status(200).json({
+        message: 'Parking session ended',
+        session,
+        paymentIntentId,
+        cost: totalCost,
+        duration: `${Math.floor(durationMinutes / 60)}h ${durationMinutes % 60}m`,
+        paymentIntentError,
+      });
 
       await session.save();
 
@@ -361,10 +420,17 @@ export const sessionControllerV2 = {
         return res.status(404).json({ message: 'Session not found' });
       }
       if (session.userId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ message: 'This parking session does not belong to you' });
+        return res
+          .status(403)
+          .json({ message: 'This parking session does not belong to you' });
       }
-      if (!session.paymentIntentId || session.paymentIntentId !== paymentIntentId) {
-        return res.status(400).json({ message: 'Payment intent does not match this session' });
+      if (
+        !session.paymentIntentId ||
+        session.paymentIntentId !== paymentIntentId
+      ) {
+        return res
+          .status(400)
+          .json({ message: 'Payment intent does not match this session' });
       }
 
       // Confirm with Stripe

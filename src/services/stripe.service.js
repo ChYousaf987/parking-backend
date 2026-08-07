@@ -24,10 +24,20 @@ export const stripeService = {
   // Create payment intent
   createPaymentIntent: async (customerId, amount, sessionId, description) => {
     try {
+      const amountInSubunits = Math.round(amount * 100); // PKR uses 2 decimals in this integration
+      const minAmountInSubunits = 10000; // Minimum Stripe amount for PKR (~100 PKR)
+
+      if (amountInSubunits < minAmountInSubunits) {
+        throw new Error(
+          `Amount is too low for Stripe payments. Minimum PKR amount is 100.00, but calculated amount is ${amount.toFixed(2)} PKR.`
+        );
+      }
+
       const paymentIntent = await stripe.paymentIntents.create({
         customer: customerId,
-        amount: Math.round(amount * 100), // Convert to cents
+        amount: amountInSubunits,
         currency: 'pkr',
+        payment_method_types: ['card'],
         description,
         metadata: {
           sessionId,
