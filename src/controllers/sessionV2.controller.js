@@ -308,7 +308,7 @@ export const sessionControllerV2 = {
   // End parking session (scan exit QR)
   endSessionWithQR: async (req, res) => {
     try {
-      const { sessionId, paymentMethodId } = req.body;
+      const { sessionId } = req.body;
 
       const session = await Session.findById(sessionId).populate('userId');
       if (!session) {
@@ -325,18 +325,18 @@ export const sessionControllerV2 = {
           .json({ message: 'This parking session is already closed' });
       }
 
-      const exitTime = new Date();
-      const durationMinutes = Math.ceil(
-        (exitTime - session.entryTime) / (1000 * 60)
-      );
+      const exitTime = session.exitTime || new Date();
+      const durationMinutes =
+        session.duration ??
+        Math.max(1, Math.ceil((exitTime - session.entryTime) / (1000 * 60)));
 
-      // Get location for pricing
       const location = await ParkingLocation.findById(session.locationId);
       const hourlyRate = location?.hourlyRate || 50;
-      const totalCost = (durationMinutes / 60) * hourlyRate;
+      const totalCost =
+        session.cost ?? Math.ceil((durationMinutes / 60) * hourlyRate);
 
-      // Create Stripe payment intent
       let paymentIntentId = null;
+      let clientSecret = null;
       let paymentIntentError = null;
       let paymentIntent = null;
       try {
@@ -347,7 +347,8 @@ export const sessionControllerV2 = {
             try {
               const stripeCustomer = await stripeService.createCustomer(
                 user.email,
-                `${user.firstName} ${user.lastName}`,
+                `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim() ||
+                  user.email,
                 user.phone
               );
               user.stripeCustomerId = stripeCustomer.id;
@@ -357,6 +358,7 @@ export const sessionControllerV2 = {
                 'Stripe customer creation failed:',
                 stripeCustomerError
               );
+              paymentIntentError = stripeCustomerError.message;
             }
           }
 
@@ -368,6 +370,7 @@ export const sessionControllerV2 = {
               `Parking Session - Slot ${session.parkingSpotId}`
             );
             paymentIntentId = paymentIntent.id;
+            clientSecret = paymentIntent.client_secret;
           }
         }
       } catch (paymentError) {
@@ -375,7 +378,6 @@ export const sessionControllerV2 = {
         paymentIntentError = paymentError.message;
       }
 
-      // Update session
       session.exitTime = exitTime;
       session.duration = durationMinutes;
       session.cost = totalCost;
@@ -391,8 +393,9 @@ export const sessionControllerV2 = {
         message: 'Parking session ended',
         session,
         paymentIntentId,
-        clientSecret: paymentIntent?.client_secret || null,
+        clientSecret,
         cost: totalCost,
+        currency: 'PKR',
         duration: `${Math.floor(durationMinutes / 60)}h ${durationMinutes % 60}m`,
         paymentIntentError,
       });
@@ -425,12 +428,16 @@ export const sessionControllerV2 = {
           .json({ message: 'Payment intent does not match this session' });
       }
 
-      // Confirm with Stripe
       try {
-        const paymentIntent = await stripeService.confirmPayment(
-          paymentIntentId,
-          paymentMethodId
-        );
+        let paymentIntent;
+        if (paymentMethodId) {
+          paymentIntent = await stripeService.confirmPayment(
+            paymentIntentId,
+            paymentMethodId
+          );
+        } else {
+          paymentIntent = await stripeService.getPaymentStatus(paymentIntentId);
+        }
 
         if (paymentIntent.status === 'succeeded') {
           session.paymentStatus = 'completed';
@@ -511,6 +518,75 @@ export const sessionControllerV2 = {
           availableSpots: availableSpots.length,
         },
         floors: groupedByFloor,
+      });
+    } catch (error) {
+      res.status(500).json({ message: error.message });
+    }
+  },
+
+  // Delete all active sessions for every user and free their spots
+  deleteAllActiveSessions: async (req, res) => {
+    try {
+      const activeSessions = await Session.find({ status: 'active' }).select(
+        '_id parkingSpotId locationId userId'
+      );
+
+      if (activeSessions.length === 0) {
+        return res.status(200).json({
+          message: 'No active sessions found',
+          deletedCount: 0,
+          freedSpots: 0,
+        });
+      }
+
+      const sessionIds = activeSessions.map((s) => s._id);
+      const spotIds = [
+        ...new Set(
+          activeSessions
+            .map((s) => s.parkingSpotId?.toString())
+            .filter(Boolean)
+        ),
+      ];
+      const locationIds = [
+        ...new Set(
+          activeSessions
+            .map((s) => s.locationId?.toString())
+            .filter(Boolean)
+        ),
+      ];
+
+      if (spotIds.length > 0) {
+        await ParkingSpot.updateMany(
+          { _id: { $in: spotIds } },
+          {
+            $set: {
+              status: 'available',
+              occupiedBy: null,
+              lastUpdated: new Date(),
+            },
+          }
+        );
+      }
+
+      const deleteResult = await Session.deleteMany({
+        _id: { $in: sessionIds },
+      });
+
+      for (const locationId of locationIds) {
+        const occupiedCount = await ParkingSpot.countDocuments({
+          locationId,
+          status: 'occupied',
+        });
+        await ParkingLocation.findByIdAndUpdate(locationId, {
+          currentOccupancy: occupiedCount,
+        });
+      }
+
+      res.status(200).json({
+        message: 'All active sessions deleted',
+        deletedCount: deleteResult.deletedCount,
+        freedSpots: spotIds.length,
+        affectedLocations: locationIds.length,
       });
     } catch (error) {
       res.status(500).json({ message: error.message });
