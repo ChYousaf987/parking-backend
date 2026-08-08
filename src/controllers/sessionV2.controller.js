@@ -539,19 +539,15 @@ export const sessionControllerV2 = {
         });
       }
 
-      const sessionIds = activeSessions.map((s) => s._id);
+      const sessionIds = activeSessions.map(s => s._id);
       const spotIds = [
         ...new Set(
-          activeSessions
-            .map((s) => s.parkingSpotId?.toString())
-            .filter(Boolean)
+          activeSessions.map(s => s.parkingSpotId?.toString()).filter(Boolean)
         ),
       ];
       const locationIds = [
         ...new Set(
-          activeSessions
-            .map((s) => s.locationId?.toString())
-            .filter(Boolean)
+          activeSessions.map(s => s.locationId?.toString()).filter(Boolean)
         ),
       ];
 
