@@ -338,6 +338,7 @@ export const sessionControllerV2 = {
       // Create Stripe payment intent
       let paymentIntentId = null;
       let paymentIntentError = null;
+      let paymentIntent = null;
       try {
         const userId = session.userId?._id || session.userId;
         const user = await User.findById(userId);
@@ -360,7 +361,7 @@ export const sessionControllerV2 = {
           }
 
           if (user.stripeCustomerId) {
-            const paymentIntent = await stripeService.createPaymentIntent(
+            paymentIntent = await stripeService.createPaymentIntent(
               user.stripeCustomerId,
               totalCost,
               session._id.toString(),
@@ -380,7 +381,7 @@ export const sessionControllerV2 = {
       session.cost = totalCost;
       // Keep the slot occupied until payment succeeds. It is released by
       // confirmPayment after Stripe confirms the charge.
-      session.status = paymentIntentId ? 'active' : 'active';
+      session.status = 'active';
       session.paymentStatus = paymentIntentId ? 'pending' : 'failed';
       session.paymentIntentId = paymentIntentId;
 
@@ -390,19 +391,10 @@ export const sessionControllerV2 = {
         message: 'Parking session ended',
         session,
         paymentIntentId,
+        clientSecret: paymentIntent?.client_secret || null,
         cost: totalCost,
         duration: `${Math.floor(durationMinutes / 60)}h ${durationMinutes % 60}m`,
         paymentIntentError,
-      });
-
-      await session.save();
-
-      res.status(200).json({
-        message: 'Parking session ended',
-        session,
-        paymentIntentId,
-        cost: totalCost,
-        duration: `${Math.floor(durationMinutes / 60)}h ${durationMinutes % 60}m`,
       });
     } catch (error) {
       res.status(500).json({ message: error.message });
