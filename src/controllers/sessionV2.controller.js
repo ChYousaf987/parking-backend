@@ -11,6 +11,7 @@ import {
 } from '../services/qrcode.service.js';
 import { Vehicle } from '../models/Vehicle.js';
 import { stripeService } from '../services/stripe.service.js';
+import { notificationService } from '../services/notification.service.js';
 
 export const sessionControllerV2 = {
   // Generate Entry QR Code
@@ -160,6 +161,12 @@ export const sessionControllerV2 = {
         currentOccupancy: occupiedCount,
       });
 
+      notificationService.sendToUser(userId, {
+        title: 'Parking session started',
+        body: `Slot ${spot.spotNumber} on floor ${spot.floor} has been assigned to you.`,
+        data: { type: 'session_started', sessionId: session._id },
+      });
+
       res.status(201).json({
         message: 'Parking session started via gate scan',
         session,
@@ -293,6 +300,12 @@ export const sessionControllerV2 = {
 
       await ParkingLocation.findByIdAndUpdate(locationId, {
         currentOccupancy: occupiedCount,
+      });
+
+      notificationService.sendToUser(userId, {
+        title: 'Parking session started',
+        body: `Your parking slot ${spot.spotNumber} has been assigned.`,
+        data: { type: 'session_started', sessionId: session._id },
       });
 
       res.status(201).json({
@@ -456,6 +469,12 @@ export const sessionControllerV2 = {
           });
           await ParkingLocation.findByIdAndUpdate(session.locationId, {
             currentOccupancy: occupiedCount,
+          });
+
+          notificationService.sendToUser(session.userId, {
+            title: 'Payment successful',
+            body: `Your parking payment of PKR ${session.cost} was successful.`,
+            data: { type: 'payment_successful', sessionId: session._id },
           });
 
           res.status(200).json({

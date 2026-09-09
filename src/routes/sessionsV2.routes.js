@@ -35,10 +35,7 @@ router.post(
   authMiddleware,
   sessionControllerV2.confirmPayment
 );
-router.delete(
-  '/active/all',
-  sessionControllerV2.deleteAllActiveSessions
-);
+router.delete('/active/all', sessionControllerV2.deleteAllActiveSessions);
 router.get(
   '/history/:userId',
   authMiddleware,

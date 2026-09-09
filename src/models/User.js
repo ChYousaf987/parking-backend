@@ -93,6 +93,13 @@ const userSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+
+    // A user can be signed in on more than one phone.
+    // These tokens are issued by Firebase on the client application.
+    fcmTokens: {
+      type: [String],
+      default: [],
+    },
   },
   { timestamps: true }
 );

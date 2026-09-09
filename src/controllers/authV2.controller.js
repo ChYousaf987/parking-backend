@@ -226,7 +226,7 @@ export const authControllerV2 = {
   // Login
   login: async (req, res) => {
     try {
-      const { email, password } = req.body;
+      const { email, password, fcmToken } = req.body;
 
       if (!email || !password) {
         return res
@@ -253,6 +253,11 @@ export const authControllerV2 = {
       }
 
       user.lastLogin = new Date();
+      // The mobile client sends its Firebase token with login. Keep tokens
+      // unique so the same device does not receive duplicate notifications.
+      if (typeof fcmToken === 'string' && fcmToken.trim()) {
+        user.fcmTokens = [...new Set([...(user.fcmTokens || []), fcmToken.trim()])];
+      }
       await user.save();
 
       const token = generateToken(user._id);

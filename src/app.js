@@ -10,6 +10,7 @@ import sessionRoutes from './routes/session.routes.js';
 import sessionsV2Routes from './routes/sessionsV2.routes.js';
 import vehicleRoutes from './routes/vehicle.routes.js';
 import dashboardRoutes from './routes/dashboard.routes.js';
+import notificationRoutes from './routes/notification.routes.js';
 
 const app = express();
 
@@ -82,6 +83,7 @@ app.use('/api/sessions/v2', sessionsV2Routes);
 app.use('/api/sessions', sessionRoutes);
 app.use('/api/vehicles', vehicleRoutes);
 app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 // test api
 app.get('/', (req, res) => {
