@@ -608,6 +608,75 @@ export const sessionControllerV2 = {
     }
   },
 
+  // Delete all sessions for the authenticated user and free occupied spots
+  deleteMySessions: async (req, res) => {
+    try {
+      const userId = req.user._id;
+
+      const sessions = await Session.find({ userId }).select(
+        '_id parkingSpotId locationId status'
+      );
+
+      if (sessions.length === 0) {
+        return res.status(200).json({
+          message: 'No sessions found for this user',
+          deletedCount: 0,
+          freedSpots: 0,
+        });
+      }
+
+      const occupyingSessions = sessions.filter(
+        s => s.status === 'active' || s.status === 'pending'
+      );
+      const spotIds = [
+        ...new Set(
+          occupyingSessions
+            .map(s => s.parkingSpotId?.toString())
+            .filter(Boolean)
+        ),
+      ];
+      const locationIds = [
+        ...new Set(
+          occupyingSessions.map(s => s.locationId?.toString()).filter(Boolean)
+        ),
+      ];
+
+      if (spotIds.length > 0) {
+        await ParkingSpot.updateMany(
+          { _id: { $in: spotIds } },
+          {
+            $set: {
+              status: 'available',
+              occupiedBy: null,
+              lastUpdated: new Date(),
+            },
+          }
+        );
+      }
+
+      const deleteResult = await Session.deleteMany({ userId });
+
+      for (const locationId of locationIds) {
+        const occupiedCount = await ParkingSpot.countDocuments({
+          locationId,
+          status: 'occupied',
+        });
+        await ParkingLocation.findByIdAndUpdate(locationId, {
+          currentOccupancy: occupiedCount,
+        });
+      }
+
+      res.status(200).json({
+        message: 'All your parking sessions deleted',
+        deletedCount: deleteResult.deletedCount,
+        freedSpots: spotIds.length,
+        affectedLocations: locationIds.length,
+      });
+    } catch (error) {
+      res.status(500).json({ message: error.message });
+    }
+  },
+
   // Get parking history
   getParkingHistory: async (req, res) => {
     try {
