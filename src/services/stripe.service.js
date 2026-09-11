@@ -1,8 +1,24 @@
 import Stripe from 'stripe';
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_dummy');
+/** Stripe PKR minimum is ~100.00 — charge at least that so short stays still pay. */
+export const STRIPE_MIN_PKR = 100;
+
+const stripeSecret = process.env.STRIPE_SECRET_KEY;
+if (!stripeSecret || stripeSecret === 'sk_test_dummy') {
+  console.warn(
+    '[stripe] STRIPE_SECRET_KEY is missing or invalid. PaymentIntent creation will fail.'
+  );
+}
+
+const stripe = new Stripe(stripeSecret || 'sk_test_dummy');
 
 export const stripeService = {
+  /** Bill amount raised to Stripe's minimum when needed. */
+  resolveChargeAmount: amount => {
+    const billAmount = Number(amount) || 0;
+    return Math.max(billAmount, STRIPE_MIN_PKR);
+  },
+
   // Create customer
   createCustomer: async (email, name, phone) => {
     try {
@@ -24,14 +40,15 @@ export const stripeService = {
   // Create payment intent
   createPaymentIntent: async (customerId, amount, sessionId, description) => {
     try {
-      const amountInSubunits = Math.round(amount * 100); // PKR uses 2 decimals in this integration
-      const minAmountInSubunits = 10000; // Minimum Stripe amount for PKR (~100 PKR)
-
-      if (amountInSubunits < minAmountInSubunits) {
+      if (!stripeSecret || stripeSecret === 'sk_test_dummy') {
         throw new Error(
-          `Amount is too low for Stripe payments. Minimum PKR amount is 100.00, but calculated amount is ${amount.toFixed(2)} PKR.`
+          'Stripe is not configured on the server (missing STRIPE_SECRET_KEY)'
         );
       }
+
+      const billAmount = Number(amount) || 0;
+      const chargedAmount = stripeService.resolveChargeAmount(billAmount);
+      const amountInSubunits = Math.round(chargedAmount * 100);
 
       const paymentIntent = await stripe.paymentIntents.create({
         customer: customerId,
@@ -40,7 +57,9 @@ export const stripeService = {
         payment_method_types: ['card'],
         description,
         metadata: {
-          sessionId,
+          sessionId: String(sessionId),
+          billedAmount: String(billAmount),
+          chargedAmount: String(chargedAmount),
         },
       });
       return paymentIntent;
@@ -50,7 +69,7 @@ export const stripeService = {
     }
   },
 
-  // Confirm payment
+  // Confirm payment (only when still open)
   confirmPayment: async (paymentIntentId, paymentMethodId) => {
     try {
       const paymentIntent = await stripe.paymentIntents.confirm(

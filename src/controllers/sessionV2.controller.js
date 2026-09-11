@@ -226,7 +226,8 @@ export const sessionControllerV2 = {
         Math.ceil((exitTime - session.entryTime) / 60000)
       );
       const hourlyRate = session.locationId.hourlyRate;
-      const cost = Math.ceil((durationMinutes / 60) * hourlyRate);
+      const billedCost = Math.ceil((durationMinutes / 60) * hourlyRate);
+      const cost = stripeService.resolveChargeAmount(billedCost);
 
       session.exitTime = exitTime;
       session.duration = durationMinutes;
@@ -244,6 +245,7 @@ export const sessionControllerV2 = {
           durationMinutes,
           hourlyRate,
           amount: cost,
+          billedAmount: billedCost,
           currency: 'PKR',
           paymentStatus: 'pending',
         },
@@ -345,17 +347,21 @@ export const sessionControllerV2 = {
 
       const location = await ParkingLocation.findById(session.locationId);
       const hourlyRate = location?.hourlyRate || 50;
-      const totalCost =
+      const billedCost =
         session.cost ?? Math.ceil((durationMinutes / 60) * hourlyRate);
+      // Stripe rejects very small PKR amounts — charge at least the minimum.
+      const totalCost = stripeService.resolveChargeAmount(billedCost);
 
-      let paymentIntentId = null;
+      let paymentIntentId = session.paymentIntentId || null;
       let clientSecret = null;
       let paymentIntentError = null;
       let paymentIntent = null;
       try {
         const userId = session.userId?._id || session.userId;
         const user = await User.findById(userId);
-        if (user) {
+        if (!user) {
+          paymentIntentError = 'User not found for payment';
+        } else {
           if (!user.stripeCustomerId) {
             try {
               const stripeCustomer = await stripeService.createCustomer(
@@ -375,7 +381,30 @@ export const sessionControllerV2 = {
             }
           }
 
-          if (user.stripeCustomerId) {
+          // Reuse an open PaymentIntent when the user retries payment.
+          if (paymentIntentId && user.stripeCustomerId) {
+            try {
+              const existing =
+                await stripeService.getPaymentStatus(paymentIntentId);
+              if (
+                existing.status === 'requires_payment_method' ||
+                existing.status === 'requires_confirmation' ||
+                existing.status === 'requires_action'
+              ) {
+                paymentIntent = existing;
+                clientSecret = existing.client_secret;
+              } else if (existing.status === 'succeeded') {
+                paymentIntent = existing;
+                clientSecret = existing.client_secret;
+              } else {
+                paymentIntentId = null;
+              }
+            } catch (_) {
+              paymentIntentId = null;
+            }
+          }
+
+          if (!clientSecret && user.stripeCustomerId) {
             paymentIntent = await stripeService.createPaymentIntent(
               user.stripeCustomerId,
               totalCost,
@@ -402,12 +431,28 @@ export const sessionControllerV2 = {
 
       await session.save();
 
+      if (!clientSecret) {
+        return res.status(400).json({
+          message:
+            paymentIntentError ||
+            'Could not create Stripe payment. Check STRIPE_SECRET_KEY on the server.',
+          session,
+          paymentIntentId,
+          clientSecret: null,
+          cost: totalCost,
+          billedCost,
+          currency: 'PKR',
+          paymentIntentError,
+        });
+      }
+
       res.status(200).json({
         message: 'Parking session ended',
         session,
         paymentIntentId,
         clientSecret,
         cost: totalCost,
+        billedCost,
         currency: 'PKR',
         duration: `${Math.floor(durationMinutes / 60)}h ${durationMinutes % 60}m`,
         paymentIntentError,
@@ -441,15 +486,43 @@ export const sessionControllerV2 = {
           .json({ message: 'Payment intent does not match this session' });
       }
 
+      // Already completed locally — idempotent success.
+      if (
+        session.status === 'completed' &&
+        session.paymentStatus === 'completed'
+      ) {
+        return res.status(200).json({
+          message: 'Payment successful',
+          session,
+        });
+      }
+
       try {
-        let paymentIntent;
-        if (paymentMethodId) {
-          paymentIntent = await stripeService.confirmPayment(
-            paymentIntentId,
-            paymentMethodId
-          );
-        } else {
-          paymentIntent = await stripeService.getPaymentStatus(paymentIntentId);
+        // PaymentSheet usually already confirmed the intent. Prefer retrieve;
+        // only call confirm() if Stripe still needs a payment method.
+        let paymentIntent =
+          await stripeService.getPaymentStatus(paymentIntentId);
+
+        if (
+          paymentIntent.status !== 'succeeded' &&
+          paymentMethodId &&
+          (paymentIntent.status === 'requires_payment_method' ||
+            paymentIntent.status === 'requires_confirmation' ||
+            paymentIntent.status === 'requires_action')
+        ) {
+          try {
+            paymentIntent = await stripeService.confirmPayment(
+              paymentIntentId,
+              paymentMethodId
+            );
+          } catch (confirmErr) {
+            // Race: PaymentSheet may have just succeeded.
+            paymentIntent =
+              await stripeService.getPaymentStatus(paymentIntentId);
+            if (paymentIntent.status !== 'succeeded') {
+              throw confirmErr;
+            }
+          }
         }
 
         if (paymentIntent.status === 'succeeded') {
@@ -483,11 +556,34 @@ export const sessionControllerV2 = {
           });
         } else {
           res.status(400).json({
-            message: 'Payment failed',
+            message: `Payment not completed (status: ${paymentIntent.status})`,
             status: paymentIntent.status,
           });
         }
       } catch (stripeError) {
+        // Do not mark failed if the charge already succeeded on Stripe.
+        try {
+          const latest =
+            await stripeService.getPaymentStatus(paymentIntentId);
+          if (latest.status === 'succeeded') {
+            session.paymentStatus = 'completed';
+            session.paymentMethod = 'card';
+            session.status = 'completed';
+            await session.save();
+            await ParkingSpot.findByIdAndUpdate(session.parkingSpotId, {
+              status: 'available',
+              occupiedBy: null,
+              lastUpdated: new Date(),
+            });
+            return res.status(200).json({
+              message: 'Payment successful',
+              session,
+            });
+          }
+        } catch (_) {
+          /* ignore */
+        }
+
         session.paymentStatus = 'failed';
         await session.save();
 
